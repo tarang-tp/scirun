@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -7,7 +7,7 @@ from scirun.kubernetes.jobs import JobStatus
 from scirun.records import load_metrics, load_record, save_record
 from scirun.report import build_row, cpu_utilization, format_table, memory_utilization
 
-NOW = datetime.now(timezone.utc)
+NOW = datetime.now(UTC)
 STATUS = JobStatus("demo-abc123", "Succeeded", NOW, NOW, 20.0)
 RECORD = {"cpu": "500m", "memory": "1Gi"}
 METRICS = {"wall_seconds": 10.0, "cpu_seconds": 4.0, "peak_memory_bytes": 256 * 2**20}
@@ -29,7 +29,7 @@ def test_missing_pieces_render_dashes():
 
 def test_table_contains_values():
     out = format_table([build_row("demo-abc123", STATUS, RECORD, METRICS)])
-    assert "demo-abc123" in out and "1024Mi" in out and "(80%)" in out and "(25%)" in out
+    assert "demo-abc123" in out and "1Gi" in out and "(80%)" in out and "(25%)" in out
 
 
 def test_records_roundtrip(tmp_path, monkeypatch):

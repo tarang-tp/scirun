@@ -2,10 +2,11 @@
 
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
-from kubernetes import client, config as kube_config
+from kubernetes import client
+from kubernetes import config as kube_config
 from kubernetes.client.rest import ApiException
 
 from scirun.config import NODE_RESULTS_ROOT, ExperimentSpec
@@ -119,7 +120,7 @@ def get_status(job_id: str) -> JobStatus:
     start = status.start_time
     duration = None
     if start is not None:
-        duration = ((end or datetime.now(timezone.utc)) - start).total_seconds()
+        duration = ((end or datetime.now(UTC)) - start).total_seconds()
         if phase in ("Pending",):
             duration = None
 
@@ -138,3 +139,12 @@ def _failure_detail(job_id: str) -> str | None:
             if waiting is not None and waiting.reason:
                 return f"container {waiting.reason}: {waiting.message or ''}".strip()
     return None
+
+
+def current_context() -> str | None:
+    """Name of the active kubeconfig context, or None if there isn't one."""
+    try:
+        _, active = kube_config.list_kube_config_contexts()
+    except (kube_config.ConfigException, OSError):
+        return None
+    return active["name"] if active else None

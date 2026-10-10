@@ -1,6 +1,6 @@
 # SciRun Design (v0 draft)
 
-> Everything here is **planned**. Update this document as decisions change.
+> Status: Stages 0-4 are implemented and the V1 definition in section 10 was verified end to end on a local kind cluster. Sections describe what was built and why. Update this document as decisions change.
 
 ## 1. Goal
 

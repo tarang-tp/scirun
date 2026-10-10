@@ -54,24 +54,35 @@ def _num(v: float | None, fmt: str) -> str:
     return "-" if v is None else format(v, fmt)
 
 
+def _mem(v: float | None) -> str:
+    if v is None:
+        return "-"
+    return f"{v / 2**30:.0f}Gi" if v >= 2**30 and v % 2**30 == 0 else f"{v / 2**20:.0f}Mi"
+
+
 def _pct(v: float | None) -> str:
     return "" if v is None else f" ({v:.0%})"
 
 
-def format_table(rows: list[ReportRow]) -> str:
-    header = ["JOB", "PHASE", "CPU REQ", "MEM REQ", "JOB TIME", "RUN TIME", "CPU TIME (util)", "PEAK MEM (util)"]
+def table_cells(rows: list[ReportRow]) -> tuple[list[str], list[list[str]]]:
+    header = ["JOB", "PHASE", "CPU", "MEM", "TIME", "RUN", "CPU USED", "MEM USED"]
     body = [
         [
             r.job_id,
             r.phase or "gone",
             _num(r.cpu_request, "g"),
-            "-" if r.memory_request is None else f"{r.memory_request / 2**20:.0f}Mi",
+            _mem(r.memory_request),
             _secs(r.job_seconds),
             _secs(r.run_seconds),
             _secs(r.cpu_seconds) + _pct(cpu_utilization(r)),
-            ("-" if r.peak_memory is None else f"{r.peak_memory / 2**20:.0f}Mi") + _pct(memory_utilization(r)),
+            _mem(r.peak_memory) + _pct(memory_utilization(r)),
         ]
         for r in rows
     ]
+    return header, body
+
+
+def format_table(rows: list[ReportRow]) -> str:
+    header, body = table_cells(rows)
     widths = [max(len(row[i]) for row in [header, *body]) for i in range(len(header))]
     return "\n".join("  ".join(cell.ljust(w) for cell, w in zip(row, widths)).rstrip() for row in [header, *body])
