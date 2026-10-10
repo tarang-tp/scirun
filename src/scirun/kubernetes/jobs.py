@@ -8,7 +8,7 @@ from typing import Any
 from kubernetes import client, config as kube_config
 from kubernetes.client.rest import ApiException
 
-from scirun.config import ExperimentSpec
+from scirun.config import NODE_RESULTS_ROOT, ExperimentSpec
 
 NAMESPACE = "default"
 MANAGED_BY = {"app.kubernetes.io/managed-by": "scirun"}
@@ -60,7 +60,15 @@ def build_job_manifest(spec: ExperimentSpec, job_id: str) -> dict[str, Any]:
                 "spec": {
                     "restartPolicy": "Never",
                     "containers": [container],
-                    "volumes": [{"name": "results", "emptyDir": {}}],
+                    "volumes": [
+                        {
+                            "name": "results",
+                            "hostPath": {
+                                "path": f"{NODE_RESULTS_ROOT}/{job_id}",
+                                "type": "DirectoryOrCreate",
+                            },
+                        }
+                    ],
                 },
             },
         },

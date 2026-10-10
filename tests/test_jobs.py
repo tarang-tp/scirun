@@ -25,6 +25,7 @@ def test_manifest_shape():
     assert c["resources"]["requests"] == {"cpu": "2", "memory": "512Mi"}
     assert c["resources"]["limits"] == c["resources"]["requests"]
     assert c["volumeMounts"][0]["mountPath"] == "/results"
+    assert pod["volumes"][0]["hostPath"]["path"] == "/scirun-results/demo-abc123"
 
 
 def test_manifest_command_override():

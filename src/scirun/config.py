@@ -1,5 +1,6 @@
 """Experiment spec loading and validation."""
 
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -11,6 +12,15 @@ import yaml
 _NAME_RE = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
 _MAX_NAME_LEN = 50
 _KNOWN_KEYS = {"name", "image", "command", "args", "resources", "results"}
+
+
+# Where job results live on the Mac, and where kind mounts that folder inside the node.
+# scripts/create-cluster.sh sets up the mount; keep the node path in sync with it.
+NODE_RESULTS_ROOT = "/scirun-results"
+
+
+def results_root() -> Path:
+    return Path(os.environ.get("SCIRUN_RESULTS_DIR", "~/.scirun/results")).expanduser()
 
 
 class SpecError(ValueError):

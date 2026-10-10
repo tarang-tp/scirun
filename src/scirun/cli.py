@@ -1,12 +1,14 @@
 import sys
+from pathlib import Path
 from typing import NoReturn
 
 import typer
 import urllib3
 from kubernetes.client.rest import ApiException
 
-from scirun.config import SpecError, load_spec
+from scirun.config import SpecError, load_spec, results_root
 from scirun.kubernetes import jobs, logs as k8s_logs
+from scirun.results import ResultsNotFound, fetch_results
 
 app = typer.Typer(help="Run and manage scientific workloads on Kubernetes (pre-alpha).")
 
@@ -71,6 +73,26 @@ def logs(
 
 
 @app.command()
-def results(job_id: str) -> None:
-    """Fetch result files for a job (not implemented until Stage 3)."""
-    _fail("results is not implemented yet")
+def results(
+    job_id: str,
+    out: Path | None = typer.Option(None, "--out", "-o", help="Destination (default: ./results/<job-id>)"),
+) -> None:
+    """Copy a finished job's result files to local disk."""
+    def lookup_phase() -> str | None:
+        try:
+            return jobs.get_status(job_id).phase
+        except jobs.JobNotFound:
+            return None  # Job was cleaned up (TTL); its results may still be on disk
+
+    phase = _guard(lookup_phase)
+    if phase in ("Pending", "Running"):
+        _fail(f"job is {phase}; wait for it to finish (see `scirun status {job_id}`)")
+    if phase == "Failed":
+        typer.echo("warning: job failed; results may be partial", err=True)
+    dest = out or Path("results") / job_id
+    try:
+        files = fetch_results(job_id, results_root(), dest)
+    except ResultsNotFound as e:
+        _fail(f"{e}. Was the cluster created with scripts/create-cluster.sh?")
+    for f in files:
+        typer.echo(dest / f)

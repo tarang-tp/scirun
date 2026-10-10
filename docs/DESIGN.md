@@ -69,15 +69,17 @@ Implemented in Stage 2 (`src/scirun/config.py`). Unknown fields are rejected so 
 
 Possible later: `list`, `delete`.
 
-## 7. Results handling (open question)
+## 7. Results handling (decided in Stage 3)
 
-V1 needs a simple, reliable mechanism. Candidates:
+Candidates considered:
 
 1. `kubectl cp`-style copy from a completed pod (pod must still exist; fragile).
 2. Shared hostPath/extraMounts volume between the kind node and the Mac (simple locally, not portable).
 3. Object storage (MinIO) in-cluster (robust, more moving parts).
 
-Leaning toward option 2 for V1, decided in Stage 3.
+**Chosen for V1: option 2.** `scripts/create-cluster.sh` creates the kind cluster with `~/.scirun/results` (override with `SCIRUN_RESULTS_DIR`) mounted at `/scirun-results` in the node. Each Job mounts `/scirun-results/<job-id>` as a `hostPath` at the spec's `results.path`. `scirun results <job-id>` copies that folder to `./results/<job-id>` (or `--out`). Results therefore outlive the pod and the Job, and `results` works after the Job's TTL cleanup.
+
+Limitations: kind-only (the mount is fixed at cluster creation, so an existing cluster must be recreated), local-only, and no cleanup of old results folders. Moving to a real cluster would mean option 3.
 
 ## 8. Repository layout
 
