@@ -67,6 +67,9 @@ Implemented in Stage 2 (`src/scirun/config.py`). Unknown fields are rejected so 
 | `scirun logs <job-id> [--follow]` | Print or stream pod logs |
 | `scirun results <job-id> [--out DIR]` | Copy result files to local disk |
 | `scirun report <job-id>...` | Compare requests, timings and measured usage |
+| `scirun submit <spec> --follow` | Submit and watch progress; for parallel jobs, also runs the gather step |
+| `scirun gather <job-id>` | (Re)run the gather step of a parallel job |
+| `scirun status <job-id> --tiles` | Per-tile state, attempts, node and time |
 
 Added after V1: `scirun list` (SciRun-labeled Jobs, newest first) and `scirun delete <job-id>... [--results]`. `delete` only touches Jobs labeled `app.kubernetes.io/managed-by=scirun`, keeps result files unless `--results` is given (which asks for confirmation unless `-y`), and rejects job IDs that are not plain `[a-z0-9-]` names.
 
@@ -95,6 +98,23 @@ Sources, joined by job ID:
 Why not metrics-server: it samples about every 15s, which misses short jobs, and it needs extra cluster setup. Revisit for long-running workloads.
 
 First finding (Mandelbrot 2000x1333, single-threaded numpy): run time was 70s, 31s, 16s and 16s at 0.25, 0.5, 1 and 2 CPUs. Time scales with the CPU limit up to 1 CPU and then stops; at 2 CPUs utilization is 51% because the workload cannot use a second core. Peak memory was 223Mi regardless. A 64Mi limit gives `OOMKilled` (exit 137), shown by `scirun status`.
+
+## 7c. Parallel jobs
+
+A spec with `parallelism: N` becomes a Kubernetes Indexed Job (`completionMode: Indexed`, `completions: N`, `parallelism: N`). Kubernetes gives each pod `JOB_COMPLETION_INDEX`; SciRun adds `SCIRUN_TILE_COUNT` and `NODE_NAME`. Tiles are independent: no communication between pods.
+
+Decisions:
+
+- **Per-tile retries:** `backoffLimitPerIndex: <retries>` with `maxFailedIndexes: N`. A tile that crashes is rerun alone; one that exhausts its retries does not cancel the others, so a failed job still leaves N-1 usable tiles. The Job ends `Failed` and `status` names the failed tiles.
+- **Idempotent tiles:** each tile output is written to a temp file and renamed, so a retry or a duplicate pod cannot expose a partial file. Rerunning a finished tile overwrites it with identical bytes.
+- **Gather as a second Job (`<job-id>-gather`):** SciRun creates it after the tile Job succeeds, in the same image and on the same results folder, running the spec's `gather.args`. The gather step verifies that every tile exists and that the row count matches before writing the final file, and exits non-zero otherwise. Chosen over stitching inside the CLI to keep workload-specific logic out of `scirun` and to exercise real Job-to-Job sequencing.
+- **No controller:** the CLI drives the sequence. `submit --follow` watches the tile Job, then submits gather. If the CLI exits, the tiles still finish, and `scirun gather <job-id>` resumes from the saved spec in `.jobs/<id>.json`. It is safe to repeat: an existing successful gather Job is reused, a failed one is replaced.
+- **Phase of an Indexed Job:** `status.succeeded` counts finished pods, so a job is `Succeeded` only once Kubernetes sets the `Complete` condition.
+- **Stragglers:** a running tile is flagged slow when it has run longer than twice the median of finished tiles (at least 3 finished tiles and 5s). This is a heuristic, shown by `status`, not acted on automatically.
+- **Naming:** spec names are limited to 40 characters so `<name>-<6 hex>-gather` stays within the 63-character label limit.
+- **Tiling:** the Mandelbrot workload splits the image into horizontal strips of near-equal row count. The strips are not equal work (the middle of the set takes the full iteration count), which makes them a natural source of stragglers.
+
+Measured on one kind node (3000x2000, 400 iterations): 50.0s single pod vs 16.0s for 8 tiles (3.1x job time), with compute time 46.4s vs 7.9s (5.9x). The gap is pod startup and scheduling overhead plus load imbalance.
 
 ## 8. Repository layout
 

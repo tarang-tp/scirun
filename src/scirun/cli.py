@@ -1,4 +1,5 @@
 import sys
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import NoReturn
@@ -6,12 +7,19 @@ from typing import NoReturn
 import typer
 import urllib3
 from kubernetes.client.rest import ApiException
+from rich.live import Live
 
 from scirun import ui
-from scirun.config import SpecError, load_spec, results_root
+from scirun.config import ExperimentSpec, SpecError, load_spec, results_root
 from scirun.kubernetes import jobs
 from scirun.kubernetes import logs as k8s_logs
-from scirun.records import delete_record, load_metrics, load_record, save_record
+from scirun.records import (
+    delete_record,
+    load_metrics,
+    load_record,
+    save_record,
+    spec_from_record,
+)
 from scirun.report import ReportRow, build_row, table_cells
 from scirun.results import ResultsNotFound, delete_results, fetch_results
 
@@ -29,6 +37,7 @@ _COMMANDS = [
     ("logs <job-id> [-f]", "print or stream container logs"),
     ("results <job-id>", "copy output files to local disk"),
     ("report <job-id>...", "compare resources, timings and usage"),
+    ("gather <job-id>", "(re)run the combine step of a parallel job"),
     ("delete <job-id>...", "remove jobs (and optionally results)"),
 ]
 
@@ -63,28 +72,121 @@ def main(ctx: typer.Context) -> None:
         ui.banner(jobs.current_context(), str(results_root()), _COMMANDS)
 
 
+_DONE = ("Succeeded", "Failed")
+
+
 @app.command()
-def submit(spec: str = typer.Argument(..., help="Path to an experiment YAML spec")) -> None:
+def submit(
+    spec: str = typer.Argument(..., help="Path to an experiment YAML spec"),
+    follow: bool = typer.Option(False, "--follow", "-f", help="Watch progress, then run the gather step"),
+) -> None:
     """Submit an experiment spec as a Kubernetes Job."""
     parsed = _guard(load_spec, spec)
     job_id = _guard(jobs.submit_job, parsed)
     try:
         save_record(job_id, parsed)
     except OSError as e:
-        ui.warning(f"could not save job record ({e.strerror}); `report` will lack requests")
-    if not sys.stdout.isatty():
+        ui.warning(f"could not save job record ({e.strerror}); `report` and `gather` will lack the spec")
+    if not sys.stdout.isatty() and not follow:
         typer.echo(job_id)  # plain, so `ID=$(scirun submit ...)` keeps working
         return
     ui.bullet("Submitted ", (job_id, "bold accent"), style="ok")
-    ui.detail(f"{parsed.name} · {parsed.image} · {parsed.cpu} CPU · {parsed.memory}")
-    ui.detail(f"track it with: scirun status {job_id}")
+    size = f"{parsed.parallelism} tiles · " if parsed.parallelism > 1 else ""
+    ui.detail(f"{parsed.name} · {parsed.image} · {size}{parsed.cpu} CPU · {parsed.memory}")
+    if not follow:
+        ui.detail(f"track it with: scirun status {job_id}")
+        return
+    _follow_to_the_end(parsed, job_id)
+
+
+def _follow(job_id: str, label: str = "") -> jobs.JobStatus:
+    """Poll a job until it finishes, drawing a live progress line."""
+    status = _guard(jobs.get_status, job_id)
+    if not ui.console.is_terminal:
+        last = None
+        while True:
+            line = ui.progress_line(status, label).plain
+            if line != last:
+                typer.echo(line)
+                last = line
+            if status.phase in _DONE:
+                return status
+            time.sleep(1)
+            status = _guard(jobs.get_status, job_id)
+    with Live(ui.progress_line(status, label), console=ui.console, refresh_per_second=4) as live:
+        while status.phase not in _DONE:
+            time.sleep(1)
+            status = _guard(jobs.get_status, job_id)
+            live.update(ui.progress_line(status, label))
+    return status
+
+
+def _follow_to_the_end(spec: ExperimentSpec, job_id: str) -> None:
+    try:
+        status = _follow(job_id, "tiles")
+        if status.phase == "Failed":
+            ui.detail(status.detail or "job failed", style="err")
+            ui.detail(f"inspect with: scirun status {job_id} --tiles   ·   logs: scirun logs {job_id}")
+            raise typer.Exit(1)
+        if spec.parallelism > 1 and spec.gather:
+            _run_gather(spec, job_id)
+        else:
+            ui.detail(f"fetch output with: scirun results {job_id}")
+    except KeyboardInterrupt:
+        ui.detail(f"stopped watching; the job keeps running. Resume with: scirun status {job_id}", style="warn")
+        raise typer.Exit(130) from None
+
+
+def _run_gather(spec: ExperimentSpec, job_id: str) -> None:
+    name = _guard(jobs.submit_gather, spec, job_id)
+    status = _follow(name, "gather")
+    if status.phase == "Failed":
+        ui.detail(status.detail or "gather failed", style="err")
+        ui.detail(f"see: scirun logs {name}   ·   retry with: scirun gather {job_id}")
+        raise typer.Exit(1)
+    ui.detail(f"fetch output with: scirun results {job_id}")
 
 
 @app.command()
-def status(job_id: str) -> None:
+def gather(job_id: str) -> None:
+    """(Re)run the combine step of a finished parallel job. Safe to repeat."""
+    spec = spec_from_record(load_record(job_id))
+    if spec is None or not spec.gather:
+        _fail(f"no gather step recorded for {job_id}")
+
+    def tiles_phase() -> str | None:
+        try:
+            return jobs.get_status(job_id).phase
+        except jobs.JobNotFound:
+            return None  # job was cleaned up; the gather step checks the tile files itself
+
+    phase = _guard(tiles_phase)
+    if phase not in (None, "Succeeded"):
+        _fail(f"tiles are not finished (job is {phase}); see `scirun status {job_id} --tiles`")
+    try:
+        _run_gather(spec, job_id)
+    except KeyboardInterrupt:
+        ui.detail("stopped watching; the gather job keeps running", style="warn")
+        raise typer.Exit(130) from None
+
+
+@app.command()
+def status(
+    job_id: str,
+    tiles: bool = typer.Option(False, "--tiles", "-t", help="Show one row per tile (parallel jobs)"),
+) -> None:
     """Show the status of a job."""
     s = _guard(jobs.get_status, job_id)
     ui.bullet((s.job_id, "bold accent"), "  ", ui.phase(s.phase), style=ui.PHASE_STYLE[s.phase])
+    if s.tiles_total:
+        summary = [f"{s.tiles_done}/{s.tiles_total} tiles done"]
+        if s.tiles_active:
+            summary.append(f"{s.tiles_active} running")
+        if s.tiles_failed:
+            summary.append(f"{s.tiles_failed} failed")
+        if s.retries:
+            summary.append(f"{s.retries} {'crash' if s.retries == 1 else 'crashes'}")
+        ui.detail(" · ".join(summary))
     timing = []
     if s.start_time:
         timing.append(f"started {s.start_time.astimezone():%H:%M:%S}")
@@ -94,6 +196,24 @@ def status(job_id: str) -> None:
         ui.detail(" · ".join(timing))
     if s.detail:
         ui.detail(s.detail, style="err")
+    if s.tiles_total:
+        _parallel_extras(s, tiles)
+
+
+def _parallel_extras(s: jobs.JobStatus, show_table: bool) -> None:
+    tile_rows = _guard(jobs.get_tiles, s.job_id)
+    for t in (t for t in tile_rows if t.slow):
+        ui.detail(f"tile {t.index} looks slow ({t.seconds:.0f}s while finished tiles took much less)", style="warn")
+    spec = spec_from_record(load_record(s.job_id))
+    if spec and spec.gather and s.phase == "Succeeded":
+        try:
+            g = jobs.get_status(jobs.gather_job_id(s.job_id))
+            ui.detail(f"gather: {g.phase}", style=ui.PHASE_STYLE[g.phase])
+        except jobs.JobNotFound:
+            ui.detail(f"gather has not run; start it with: scirun gather {s.job_id}", style="warn")
+    if show_table:
+        ui.console.print()
+        ui.console.print(ui.tile_table(tile_rows))
 
 
 @app.command()
@@ -147,6 +267,9 @@ def results(
         _fail(f"job is {phase}; wait for it to finish (see `scirun status {job_id}`)")
     if phase == "Failed":
         ui.warning("job failed; results may be partial")
+    spec = spec_from_record(load_record(job_id))
+    if spec and spec.gather and (problem := _gather_problem(job_id)):
+        ui.warning(f"the gather step {problem}; output may be only tiles (scirun gather {job_id})")
     dest = out or Path("results") / job_id
     try:
         files = fetch_results(job_id, results_root(), dest)
@@ -154,8 +277,8 @@ def results(
         _fail(f"{e}. Was the cluster created with scripts/create-cluster.sh?")
     noun = "file" if len(files) == 1 else "files"
     ui.bullet(f"Copied {len(files)} {noun} to ", (str(dest), "bold accent"), style="ok")
-    for f in files:
-        ui.detail(str(dest / f))
+    for entry in _summarize_files(files):
+        ui.detail(entry if entry.endswith(")") else str(dest / entry))
 
 
 @app.command(name="list")
@@ -216,3 +339,27 @@ def delete(
         elif not with_results and (results_root() / job_id).is_dir():
             ui.detail("results kept (use --results to remove them)")
 
+
+
+def _gather_problem(job_id: str) -> str | None:
+    """Why a parallel job's combined output may be missing, or None if it is fine or unknowable."""
+    try:
+        phase = jobs.get_status(jobs.gather_job_id(job_id)).phase
+    except jobs.JobNotFound:
+        return "has not run"
+    except Exception:  # noqa: BLE001 - only a courtesy warning, never block `results` on it
+        return None
+    return None if phase == "Succeeded" else "has not succeeded"
+
+
+def _summarize_files(files: list[Path]) -> list[str]:
+    """Top-level files by name; each subfolder collapsed to 'name/ (N files)'."""
+    entries: list[str] = []
+    folders: dict[str, int] = {}
+    for f in files:
+        if len(f.parts) == 1:
+            entries.append(str(f))
+        else:
+            folders[f.parts[0]] = folders.get(f.parts[0], 0) + 1
+    entries += [f"{name}/ ({n} {'file' if n == 1 else 'files'})" for name, n in folders.items()]
+    return entries

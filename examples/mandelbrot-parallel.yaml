@@ -1,0 +1,13 @@
+# The same render split into 8 horizontal strips, one pod each, then stitched together.
+name: mandelbrot
+image: scirun/mandelbrot:0.3
+parallelism: 8     # tiles / pods
+retries: 2         # extra attempts per tile before it counts as failed
+args: ["--width", 3000, "--height", 2000, "--max-iter", 400, "--out", "/results/mandelbrot.png"]
+gather:            # runs once every tile has succeeded, in the same image
+  args: ["--gather", "--width", 3000, "--height", 2000, "--out", "/results/mandelbrot.png"]
+resources:         # per pod
+  cpu: "1"
+  memory: 1Gi
+results:
+  path: /results

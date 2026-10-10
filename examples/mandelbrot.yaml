@@ -1,5 +1,5 @@
 name: mandelbrot
-image: scirun/mandelbrot:0.2
+image: scirun/mandelbrot:0.3
 args: ["--width", 2000, "--height", 1333, "--max-iter", 300, "--out", "/results/mandelbrot.png"]
 resources:
   cpu: "1"

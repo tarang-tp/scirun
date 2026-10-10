@@ -17,6 +17,7 @@ class ReportRow:
     run_seconds: float | None  # workload's own wall time
     cpu_seconds: float | None
     peak_memory: float | None  # bytes
+    parallelism: int = 1  # pods per job; CPU and memory requests are per pod
 
 
 def build_row(job_id: str, status: JobStatus | None, record: dict | None, metrics: dict | None) -> ReportRow:
@@ -30,6 +31,7 @@ def build_row(job_id: str, status: JobStatus | None, record: dict | None, metric
         run_seconds=metrics.get("wall_seconds"),
         cpu_seconds=metrics.get("cpu_seconds"),
         peak_memory=metrics.get("peak_memory_bytes"),
+        parallelism=int(record.get("parallelism", 1)),
     )
 
 
@@ -37,7 +39,7 @@ def cpu_utilization(row: ReportRow) -> float | None:
     """Fraction of the CPU allowance actually used while running."""
     if not (row.cpu_seconds is not None and row.run_seconds and row.cpu_request):
         return None
-    return row.cpu_seconds / (row.run_seconds * row.cpu_request)
+    return row.cpu_seconds / (row.run_seconds * row.cpu_request * row.parallelism)
 
 
 def memory_utilization(row: ReportRow) -> float | None:
@@ -70,7 +72,7 @@ def table_cells(rows: list[ReportRow]) -> tuple[list[str], list[list[str]]]:
         [
             r.job_id,
             r.phase or "gone",
-            _num(r.cpu_request, "g"),
+            _num(r.cpu_request, "g") + (f"×{r.parallelism}" if r.parallelism > 1 else ""),
             _mem(r.memory_request),
             _secs(r.job_seconds),
             _secs(r.run_seconds),

@@ -10,8 +10,9 @@ import yaml
 
 # Job names become DNS-1123 labels; leave room for the "-<6 hex>" suffix.
 _NAME_RE = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
-_MAX_NAME_LEN = 50
-_KNOWN_KEYS = {"name", "image", "command", "args", "resources", "results"}
+_MAX_NAME_LEN = 40  # job id adds "-<6 hex>", and "-gather" must still fit in 63 chars
+_MAX_PARALLELISM = 32
+_KNOWN_KEYS = {"name", "image", "command", "args", "resources", "results", "parallelism", "retries", "gather"}
 
 
 # Where job results live on the Mac, and where kind mounts that folder inside the node.
@@ -36,6 +37,9 @@ class ExperimentSpec:
     cpu: str = "1"
     memory: str = "1Gi"
     results_path: str = "/results"
+    parallelism: int = 1  # >1 runs an Indexed Job: one pod per tile
+    retries: int = 2  # extra attempts per tile before it counts as failed
+    gather: list[str] | None = None  # args for the follow-up job that combines tile outputs
 
 
 def load_spec(path: str | Path) -> ExperimentSpec:
@@ -77,6 +81,9 @@ def parse_spec(data: Any) -> ExperimentSpec:
         cpu=str(resources.get("cpu", "1")),
         memory=str(resources.get("memory", "1Gi")),
         results_path=str(results.get("path", "/results")),
+        parallelism=_int(data, "parallelism", default=1, low=1, high=_MAX_PARALLELISM),
+        retries=_int(data, "retries", default=2, low=0, high=10),
+        gather=_gather_args(data),
     )
 
 
@@ -92,3 +99,21 @@ def _str_list(data: dict, key: str) -> list[str]:
     if not isinstance(value, list):
         raise SpecError(f"'{key}' must be a list")
     return [str(v) for v in value]
+
+
+def _int(data: dict, key: str, *, default: int, low: int, high: int) -> int:
+    value = data.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+        raise SpecError(f"'{key}' must be an integer between {low} and {high}")
+    return value
+
+
+def _gather_args(data: dict) -> list[str] | None:
+    if "gather" not in data:
+        return None
+    gather = data["gather"]
+    if not isinstance(gather, dict) or set(gather) - {"args"}:
+        raise SpecError("'gather' must be a mapping with only an 'args' list")
+    if data.get("parallelism", 1) == 1:
+        raise SpecError("'gather' only makes sense with 'parallelism' greater than 1")
+    return _str_list(gather, "args")

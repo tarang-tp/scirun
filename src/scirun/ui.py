@@ -60,6 +60,57 @@ def list_table(rows: list[list[str]]) -> Table:
     return table
 
 
+_BAR_WIDTH = 20
+
+
+def progress_line(status, label: str = "") -> Text:
+    """One live line for a running job: a bar for parallel jobs, the phase for single-pod ones."""
+    style = PHASE_STYLE.get(status.phase, "muted")
+    line = Text.assemble(("● ", style), (status.job_id, "bold accent"), "  ")
+    parts = []
+    if status.tiles_total:
+        filled = round(_BAR_WIDTH * status.tiles_done / status.tiles_total)
+        bar_style = {"Succeeded": "ok", "Failed": "err"}.get(status.phase, "accent")
+        line.append("█" * filled, style=bar_style)
+        line.append("░" * (_BAR_WIDTH - filled), style="muted")
+        line.append(f"  {status.tiles_done}/{status.tiles_total} {label or 'tiles'}")
+        if status.tiles_failed:
+            parts.append((f"{status.tiles_failed} failed", "err"))
+        if status.retries:
+            parts.append((f"{status.retries} {'crash' if status.retries == 1 else 'crashes'}", "warn"))
+    else:
+        line.append(status.phase, style=style)
+        if label:
+            line.append(f" {label}", style="muted")
+    if status.duration_seconds is not None:
+        parts.append((f"{status.duration_seconds:.0f}s", "muted"))
+    for text, part_style in parts:
+        line.append(" · ", style="muted")
+        line.append(text, style=part_style)
+    return line
+
+
+_TILE_STYLE = {"done": "ok", "running": "accent", "retrying": "warn", "failed": "err", "pending": "muted"}
+
+
+def tile_table(tiles) -> Table:
+    table = Table(box=None, pad_edge=False, show_edge=False, header_style="muted", padding=(0, 1))
+    for h in ("TILE", "STATE", "TRIES", "NODE", "TIME"):
+        table.add_column(h)
+    for t in tiles:
+        state = Text(t.state, style=_TILE_STYLE[t.state])
+        if t.slow:
+            state.append(" slow", style="warn")
+        table.add_row(
+            Text(str(t.index), style="accent"),
+            state,
+            str(t.attempts) if t.attempts else "-",
+            Text(t.node or "-", style="muted"),
+            f"{t.seconds:.0f}s" if t.seconds is not None else "-",
+        )
+    return table
+
+
 def banner(cluster: str | None, results_dir: str, commands: list[tuple[str, str]]) -> None:
     info = Group(
         Text.assemble(("◆ ", "accent"), "Welcome to ", ("SciRun", "bold accent")),

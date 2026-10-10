@@ -17,7 +17,7 @@ spec:
       restartPolicy: Never
       containers:
         - name: mandelbrot
-          image: scirun/mandelbrot:0.2
+          image: scirun/mandelbrot:0.3
           imagePullPolicy: IfNotPresent   # image is loaded into kind, not pulled from a registry
           args: ["--width", "2000", "--height", "1333", "--max-iter", "300", "--out", "/results/mandelbrot.png"]
           resources:
