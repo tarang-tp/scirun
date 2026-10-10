@@ -1,0 +1,8 @@
+name: mandelbrot
+image: scirun/mandelbrot:0.1
+args: ["--width", 2000, "--height", 1333, "--max-iter", 300, "--out", "/results/mandelbrot.png"]
+resources:
+  cpu: "1"
+  memory: 1Gi
+results:
+  path: /results

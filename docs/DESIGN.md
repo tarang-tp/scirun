@@ -48,15 +48,15 @@ Note: Apple Silicon means arm64 images; workload images should be built for the 
 ```yaml
 name: mandelbrot
 image: scirun/mandelbrot:0.1
-command: ["python", "main.py", "--width", "2000", "--out", "/results/mandelbrot.png"]
-resources:
+args: ["--width", 2000, "--out", "/results/mandelbrot.png"]   # optional `command` overrides the image entrypoint
+resources:        # applied as both requests and limits
   cpu: "1"
   memory: 1Gi
 results:
-  path: /results
+  path: /results  # mounted as an emptyDir until Stage 3
 ```
 
-Open question: field names are provisional and will be finalized in Stage 2.
+Implemented in Stage 2 (`src/scirun/config.py`). Unknown fields are rejected so typos fail fast. Job IDs are `<name>-<6 hex>`, used as the Kubernetes Job name; Jobs carry the labels `app.kubernetes.io/managed-by=scirun` and `scirun.io/experiment=<name>`.
 
 ## 6. CLI commands (planned)
 
