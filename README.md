@@ -125,4 +125,4 @@ Also done: `list`, `delete`, parallel jobs with per-tile retries and a gather st
 
 ## License
 
-TBD.
+[MIT](LICENSE)

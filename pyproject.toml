@@ -3,6 +3,8 @@ name = "scirun"
 version = "0.0.1"
 description = "A CLI for running and managing scientific workloads on Kubernetes (pre-alpha)."
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
     "typer>=0.12",
