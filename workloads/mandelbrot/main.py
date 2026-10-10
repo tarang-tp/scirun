@@ -1,6 +1,8 @@
 """Render the Mandelbrot set to a PNG."""
 
 import argparse
+import json
+import resource
 import time
 from pathlib import Path
 
@@ -40,6 +42,20 @@ def main() -> None:
     args.out.parent.mkdir(parents=True, exist_ok=True)
     Image.fromarray(pixels, mode="L").save(args.out)
     print(f"Wrote {args.out}", flush=True)
+
+    write_metrics(args.out.parent / "metrics.json", time.perf_counter() - start)
+
+
+def write_metrics(path: Path, wall_seconds: float) -> None:
+    """Report this process's resource usage so `scirun report` can read it."""
+    usage = resource.getrusage(resource.RUSAGE_SELF)
+    metrics = {
+        "wall_seconds": wall_seconds,
+        "cpu_seconds": usage.ru_utime + usage.ru_stime,
+        "peak_memory_bytes": usage.ru_maxrss * 1024,  # Linux reports KiB
+    }
+    path.write_text(json.dumps(metrics))
+    print(f"Wrote {path}", flush=True)
 
 
 if __name__ == "__main__":

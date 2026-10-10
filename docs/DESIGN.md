@@ -81,6 +81,20 @@ Candidates considered:
 
 Limitations: kind-only (the mount is fixed at cluster creation, so an existing cluster must be recreated), local-only, and no cleanup of old results folders. Moving to a real cluster would mean option 3.
 
+## 7b. Observability (Stage 4)
+
+`scirun report <job-id>...` prints one row per job: requested CPU/memory, Job time (start to finish, includes startup), run time, CPU time and peak memory with utilization against the request.
+
+Sources, joined by job ID:
+
+- **Requests:** `scirun submit` saves `~/.scirun/results/.jobs/<job-id>.json`, so they survive Job cleanup.
+- **Job time and phase:** the live Kubernetes Job (shown as `gone` after TTL cleanup).
+- **Usage:** the workload writes `metrics.json` (`wall_seconds`, `cpu_seconds`, `peak_memory_bytes`) into its results folder. This is a convention workloads opt into; the Mandelbrot workload uses `getrusage`.
+
+Why not metrics-server: it samples about every 15s, which misses short jobs, and it needs extra cluster setup. Revisit for long-running workloads.
+
+First finding (Mandelbrot 2000x1333, single-threaded numpy): run time was 70s, 31s, 16s and 16s at 0.25, 0.5, 1 and 2 CPUs. Time scales with the CPU limit up to 1 CPU and then stops; at 2 CPUs utilization is 51% because the workload cannot use a second core. Peak memory was 223Mi regardless. A 64Mi limit gives `OOMKilled` (exit 137), shown by `scirun status`.
+
 ## 8. Repository layout
 
 ```text

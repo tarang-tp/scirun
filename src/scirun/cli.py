@@ -8,6 +8,8 @@ from kubernetes.client.rest import ApiException
 
 from scirun.config import SpecError, load_spec, results_root
 from scirun.kubernetes import jobs, logs as k8s_logs
+from scirun.records import load_metrics, load_record, save_record
+from scirun.report import ReportRow, build_row, format_table
 from scirun.results import ResultsNotFound, fetch_results
 
 app = typer.Typer(help="Run and manage scientific workloads on Kubernetes (pre-alpha).")
@@ -39,6 +41,10 @@ def submit(spec: str = typer.Argument(..., help="Path to an experiment YAML spec
     """Submit an experiment spec as a Kubernetes Job."""
     parsed = _guard(load_spec, spec)
     job_id = _guard(jobs.submit_job, parsed)
+    try:
+        save_record(job_id, parsed)
+    except OSError as e:
+        typer.echo(f"warning: could not save job record ({e.strerror}); `report` will lack requests", err=True)
     typer.echo(job_id)
 
 
@@ -70,6 +76,24 @@ def logs(
             sys.stdout.flush()
 
     _guard(run)
+
+
+@app.command()
+def report(job_ids: list[str] = typer.Argument(..., help="One or more job IDs to compare")) -> None:
+    """Compare requested resources, timings and measured usage across jobs."""
+
+    def lookup(job_id: str) -> ReportRow:
+        try:
+            status = jobs.get_status(job_id)
+        except jobs.JobNotFound:
+            status = None
+        row = build_row(job_id, status, load_record(job_id), load_metrics(job_id))
+        if status is None and row.cpu_request is None and row.run_seconds is None:
+            raise jobs.JobNotFound(job_id)
+        return row
+
+    rows = [_guard(lookup, j) for j in job_ids]
+    typer.echo(format_table(rows))
 
 
 @app.command()

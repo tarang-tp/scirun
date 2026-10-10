@@ -11,9 +11,13 @@ class ResultsNotFound(Exception):
     pass
 
 
+def valid_job_id(job_id: str) -> bool:
+    return bool(_JOB_ID_RE.match(job_id))
+
+
 def fetch_results(job_id: str, root: Path, dest: Path) -> list[Path]:
     """Copy root/<job_id> into dest and return the copied files (relative paths)."""
-    if not _JOB_ID_RE.match(job_id):
+    if not valid_job_id(job_id):
         raise ResultsNotFound(f"invalid job id: {job_id!r}")
     src = root / job_id
     if not src.is_dir():

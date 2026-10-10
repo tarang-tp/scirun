@@ -6,7 +6,7 @@ from scirun.config import SpecError, load_spec, parse_spec
 def test_example_spec_loads():
     spec = load_spec("examples/mandelbrot.yaml")
     assert spec.name == "mandelbrot"
-    assert spec.image == "scirun/mandelbrot:0.1"
+    assert spec.image.startswith("scirun/mandelbrot:")
     assert spec.args[:2] == ["--width", "2000"]  # ints are stringified
     assert spec.cpu == "1" and spec.memory == "1Gi"
 

@@ -15,6 +15,7 @@ scirun submit experiments/mandelbrot.yaml   # create a Kubernetes Job
 scirun status <job-id>                      # pending / running / succeeded / failed
 scirun logs <job-id>                        # stream container logs
 scirun results <job-id>                     # fetch output files locally
+scirun report <job-id> [<job-id> ...]       # compare resources, timings and usage
 ```
 
 ```text
