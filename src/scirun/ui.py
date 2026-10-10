@@ -42,6 +42,24 @@ def phase(name: str) -> Text:
     return Text(name, style=PHASE_STYLE.get(name, "muted"))
 
 
+def humanize_age(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if seconds >= size:
+            return f"{seconds // size}{unit}"
+    return f"{seconds}s"
+
+
+def list_table(rows: list[list[str]]) -> Table:
+    """Rows are [job, experiment, phase, age, run time]."""
+    table = Table(box=None, pad_edge=False, show_edge=False, header_style="muted", padding=(0, 1))
+    for i, h in enumerate(["JOB", "EXPERIMENT", "PHASE", "AGE", "RUN"]):
+        table.add_column(h, no_wrap=i == 0, overflow="fold" if i == 0 else "ellipsis")
+    for job, experiment, phase_name, age, run in rows:
+        table.add_row(Text(job, style="accent"), Text(experiment, style="muted"), phase(phase_name), age, run)
+    return table
+
+
 def banner(cluster: str | None, results_dir: str, commands: list[tuple[str, str]]) -> None:
     info = Group(
         Text.assemble(("◆ ", "accent"), "Welcome to ", ("SciRun", "bold accent")),

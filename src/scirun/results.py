@@ -27,3 +27,14 @@ def fetch_results(job_id: str, root: Path, dest: Path) -> list[Path]:
         raise ResultsNotFound(f"results folder {src} is empty (job wrote no files)")
     shutil.copytree(src, dest, dirs_exist_ok=True)
     return files
+
+
+def delete_results(job_id: str, root: Path) -> bool:
+    """Remove root/<job_id>. Returns whether anything was removed."""
+    if not valid_job_id(job_id):
+        return False
+    target = root / job_id
+    if not target.is_dir() or target.is_symlink():
+        return False
+    shutil.rmtree(target)
+    return True

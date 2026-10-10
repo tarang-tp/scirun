@@ -1,4 +1,5 @@
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import NoReturn
 
@@ -10,9 +11,9 @@ from scirun import ui
 from scirun.config import SpecError, load_spec, results_root
 from scirun.kubernetes import jobs
 from scirun.kubernetes import logs as k8s_logs
-from scirun.records import load_metrics, load_record, save_record
+from scirun.records import delete_record, load_metrics, load_record, save_record
 from scirun.report import ReportRow, build_row, table_cells
-from scirun.results import ResultsNotFound, fetch_results
+from scirun.results import ResultsNotFound, delete_results, fetch_results
 
 ui.apply_help_theme()
 app = typer.Typer(
@@ -23,10 +24,12 @@ app = typer.Typer(
 
 _COMMANDS = [
     ("submit <spec>", "create a Job from an experiment spec"),
+    ("list", "show jobs on the cluster, newest first"),
     ("status <job-id>", "phase, timing and failure detail"),
     ("logs <job-id> [-f]", "print or stream container logs"),
     ("results <job-id>", "copy output files to local disk"),
     ("report <job-id>...", "compare resources, timings and usage"),
+    ("delete <job-id>...", "remove jobs (and optionally results)"),
 ]
 
 
@@ -43,6 +46,8 @@ def _guard(fn, *args, **kwargs):
         _fail(str(e))
     except jobs.JobNotFound as e:
         _fail(f"job not found: {e}")
+    except jobs.NotManaged as e:
+        _fail(f"{e} is not a SciRun job; refusing to touch it")
     except urllib3.exceptions.HTTPError:
         _fail("cannot reach the Kubernetes cluster (is Docker/kind running?)")
     except ApiException as e:
@@ -151,3 +156,63 @@ def results(
     ui.bullet(f"Copied {len(files)} {noun} to ", (str(dest), "bold accent"), style="ok")
     for f in files:
         ui.detail(str(dest / f))
+
+
+@app.command(name="list")
+def list_() -> None:
+    """Show SciRun jobs on the cluster, newest first."""
+    statuses = _guard(jobs.list_jobs)
+    if not statuses:
+        ui.bullet("No jobs yet", style="muted")
+        ui.detail("create one with: scirun submit <spec>")
+        return
+    now = datetime.now(UTC)
+    rows = [
+        [
+            s.job_id,
+            s.experiment or "-",
+            s.phase,
+            ui.humanize_age((now - s.created).total_seconds()) if s.created else "-",
+            f"{s.duration_seconds:.0f}s" if s.duration_seconds is not None else "-",
+        ]
+        for s in statuses
+    ]
+    ui.console.print(ui.list_table(rows))
+
+
+@app.command()
+def delete(
+    job_ids: list[str] = typer.Argument(..., help="One or more job IDs"),
+    with_results: bool = typer.Option(False, "--results", help="Also delete result files and the saved record"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation for --results"),
+) -> None:
+    """Delete jobs from the cluster. Result files are kept unless --results is given."""
+    if with_results and not yes:
+        typer.confirm(f"Permanently delete results for {len(job_ids)} job(s)?", abort=True)
+
+    for job_id in job_ids:
+
+        def remove(job_id: str = job_id) -> bool:
+            try:
+                jobs.delete_job(job_id)
+            except jobs.JobNotFound:
+                return False  # already gone; fine if we are cleaning up local files
+            return True
+
+        removed_job = _guard(remove)
+        if not removed_job and not with_results:
+            _fail(f"job not found: {job_id}")
+        removed_results = False
+        if with_results:
+            removed_results = delete_results(job_id, results_root())
+            removed_record = delete_record(job_id)
+            if not (removed_job or removed_results or removed_record):
+                _fail(f"nothing to delete for {job_id}")
+        ui.bullet("Deleted ", (job_id, "bold accent"), style="ok")
+        if removed_job:
+            ui.detail("job removed from the cluster")
+        if with_results and (removed_results or removed_record):
+            ui.detail("results and record removed")
+        elif not with_results and (results_root() / job_id).is_dir():
+            ui.detail("results kept (use --results to remove them)")
+

@@ -35,3 +35,14 @@ def _load(path: Path, job_id: str) -> dict | None:
         return json.loads(path.read_text())
     except (OSError, json.JSONDecodeError):
         return None
+
+
+def delete_record(job_id: str) -> bool:
+    if not valid_job_id(job_id):
+        return False
+    path = results_root() / ".jobs" / f"{job_id}.json"
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return False
+    return True

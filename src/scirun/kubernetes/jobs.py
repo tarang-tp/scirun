@@ -20,6 +20,10 @@ class JobNotFound(Exception):
     pass
 
 
+class NotManaged(Exception):
+    """The Job exists but was not created by SciRun."""
+
+
 @dataclass(frozen=True)
 class JobStatus:
     job_id: str
@@ -28,6 +32,8 @@ class JobStatus:
     end_time: datetime | None
     duration_seconds: float | None
     detail: str | None = None  # failure explanation, if any
+    experiment: str | None = None  # spec name, from the Job's label
+    created: datetime | None = None
 
 
 def new_job_id(spec: ExperimentSpec) -> str:
@@ -101,14 +107,7 @@ def compute_phase(status: Any) -> str:
     return "Pending"
 
 
-def get_status(job_id: str) -> JobStatus:
-    _load()
-    try:
-        job = client.BatchV1Api().read_namespaced_job(job_id, NAMESPACE)
-    except ApiException as e:
-        if e.status == 404:
-            raise JobNotFound(job_id) from e
-        raise
+def _to_status(job: Any, detail: str | None = None) -> JobStatus:
     status = job.status
     phase = compute_phase(status)
 
@@ -119,13 +118,60 @@ def get_status(job_id: str) -> JobStatus:
         )
     start = status.start_time
     duration = None
-    if start is not None:
+    if start is not None and phase != "Pending":
         duration = ((end or datetime.now(UTC)) - start).total_seconds()
-        if phase in ("Pending",):
-            duration = None
 
-    detail = _failure_detail(job_id) if phase == "Failed" else None
-    return JobStatus(job_id, phase, start, end, duration, detail)
+    labels = job.metadata.labels or {}
+    return JobStatus(
+        job.metadata.name,
+        phase,
+        start,
+        end,
+        duration,
+        detail,
+        experiment=labels.get(EXPERIMENT_LABEL),
+        created=job.metadata.creation_timestamp,
+    )
+
+
+def _read_job(job_id: str) -> Any:
+    try:
+        return client.BatchV1Api().read_namespaced_job(job_id, NAMESPACE)
+    except ApiException as e:
+        if e.status == 404:
+            raise JobNotFound(job_id) from e
+        raise
+
+
+def get_status(job_id: str) -> JobStatus:
+    _load()
+    job = _read_job(job_id)
+    detail = _failure_detail(job_id) if compute_phase(job.status) == "Failed" else None
+    return _to_status(job, detail)
+
+
+def list_jobs() -> list[JobStatus]:
+    """SciRun-managed Jobs, newest first."""
+    _load()
+    selector = ",".join(f"{k}={v}" for k, v in MANAGED_BY.items())
+    items = client.BatchV1Api().list_namespaced_job(NAMESPACE, label_selector=selector).items
+    statuses = [_to_status(j) for j in items]
+    return sorted(statuses, key=lambda s: s.created or datetime.min.replace(tzinfo=UTC), reverse=True)
+
+
+def delete_job(job_id: str) -> None:
+    """Delete a SciRun Job and its pods. Refuses Jobs SciRun did not create."""
+    _load()
+    job = _read_job(job_id)
+    labels = job.metadata.labels or {}
+    if any(labels.get(k) != v for k, v in MANAGED_BY.items()):
+        raise NotManaged(job_id)
+    try:
+        client.BatchV1Api().delete_namespaced_job(job_id, NAMESPACE, propagation_policy="Background")
+    except ApiException as e:
+        if e.status == 404:
+            raise JobNotFound(job_id) from e
+        raise
 
 
 def _failure_detail(job_id: str) -> str | None:

@@ -66,8 +66,9 @@ Implemented in Stage 2 (`src/scirun/config.py`). Unknown fields are rejected so 
 | `scirun status <job-id>` | Show phase, start/end time, duration |
 | `scirun logs <job-id> [--follow]` | Print or stream pod logs |
 | `scirun results <job-id> [--out DIR]` | Copy result files to local disk |
+| `scirun report <job-id>...` | Compare requests, timings and measured usage |
 
-Possible later: `list`, `delete`.
+Added after V1: `scirun list` (SciRun-labeled Jobs, newest first) and `scirun delete <job-id>... [--results]`. `delete` only touches Jobs labeled `app.kubernetes.io/managed-by=scirun`, keeps result files unless `--results` is given (which asks for confirmation unless `-y`), and rejects job IDs that are not plain `[a-z0-9-]` names.
 
 ## 7. Results handling (decided in Stage 3)
 

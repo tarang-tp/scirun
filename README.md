@@ -16,6 +16,8 @@ scirun status <job-id>                   # phase, start time, duration, failure 
 scirun logs <job-id> [-f]                # print or stream container logs
 scirun results <job-id> [--out DIR]      # copy output files to ./results/<job-id>
 scirun report <job-id> [<job-id> ...]    # compare requested resources, timings, usage
+scirun list                              # jobs on the cluster, newest first
+scirun delete <job-id>... [--results]    # remove jobs; --results also deletes output files
 ```
 
 Example report, running the same workload at different CPU limits:
@@ -79,13 +81,13 @@ uv run ruff check .
 - Local kind cluster only; results use a host-mounted folder, so it is not portable to a real cluster
 - CPU workloads only; one container per job
 - No GPUs, Slurm, autoscaling, web dashboard, or scheduling beyond what Kubernetes provides
-- No cleanup of old results folders
+- Old results folders are only removed by `scirun delete --results`
 - Usage metrics come from the workload itself, not from cluster monitoring
 
 ## Roadmap
 
 Done: Mandelbrot workload, Kubernetes Job, CLI (`submit`, `status`, `logs`), results retrieval, resource report.
-Possible next steps: `scirun list` and `delete`, cluster-level metrics for long jobs, object-storage results for real clusters.
+Also done: `list` and `delete`. Possible next steps: cluster-level metrics for long jobs, object-storage results for real clusters.
 
 ## License
 
