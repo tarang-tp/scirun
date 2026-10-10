@@ -1,0 +1,35 @@
+# Hand-written Kubernetes Job (Stage 1). This is what `scirun submit` will eventually generate.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mandelbrot
+  labels:
+    app: scirun
+spec:
+  backoffLimit: 0            # don't retry on failure, so failures are easy to observe
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: scirun
+        job: mandelbrot
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: mandelbrot
+          image: scirun/mandelbrot:0.1
+          imagePullPolicy: IfNotPresent   # image is loaded into kind, not pulled from a registry
+          args: ["--width", "2000", "--height", "1333", "--max-iter", "300", "--out", "/results/mandelbrot.png"]
+          resources:
+            requests:
+              cpu: "500m"
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          volumeMounts:
+            - name: results
+              mountPath: /results
+      volumes:
+        - name: results
+          emptyDir: {}      # results vanish with the pod; Stage 3 will fix this
