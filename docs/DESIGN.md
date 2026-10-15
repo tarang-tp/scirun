@@ -69,6 +69,10 @@ Implemented in Stage 2 (`src/scirun/config.py`). Unknown fields are rejected so 
 | `scirun report <job-id>...` | Compare requests, timings and measured usage |
 | `scirun submit <spec> --follow` | Submit and watch progress; for parallel jobs, also runs the gather step |
 | `scirun gather <job-id>` | (Re)run the gather step of a parallel job |
+| `scirun show <job-id>` | Provenance and output checksums |
+| `scirun rerun <job-id>` | Resubmit the saved spec |
+| `scirun verify <job-a> <job-b>` | Compare outputs byte for byte |
+| `scirun sweep <spec> --vary k=a,b` | Run a grid of settings sequentially and compare |
 | `scirun status <job-id> --tiles` | Per-tile state, attempts, node and time |
 
 Added after V1: `scirun list` (SciRun-labeled Jobs, newest first) and `scirun delete <job-id>... [--results]`. `delete` only touches Jobs labeled `app.kubernetes.io/managed-by=scirun`, keeps result files unless `--results` is given (which asks for confirmation unless `-y`), and rejects job IDs that are not plain `[a-z0-9-]` names.
@@ -115,6 +119,30 @@ Decisions:
 - **Tiling:** the Mandelbrot workload splits the image into horizontal strips of near-equal row count. The strips are not equal work (the middle of the set takes the full iteration count), which makes them a natural source of stragglers.
 
 Measured on one kind node (3000x2000, 400 iterations): 50.0s single pod vs 16.0s for 8 tiles (3.1x job time), with compute time 46.4s vs 7.9s (5.9x). The gap is pod startup and scheduling overhead plus load imbalance.
+
+## 7d. Reproducibility
+
+Goal: be able to say what produced a result, rerun it, and check that the rerun matches.
+
+- **Record at submit:** `.jobs/<job-id>.json` holds the full spec plus a `provenance` block: UTC time, SciRun version, git commit and dirty flag of the repo containing the spec file, SHA-256 of the spec file, and the Docker image ID. Git and Docker lookups are best-effort subprocess calls (no shell, 5s timeout); a missing tool leaves the field empty rather than failing the submit. `git status` runs with `core.fsmonitor=false` so reading a repo's state cannot execute a configured program.
+- **Image identity:** images are loaded into kind from the local Docker daemon, not a registry, so `docker image inspect` is the available source of an ID. A registry digest would replace it for a real cluster.
+- **`rerun`:** rebuilds the spec from the record, not from the YAML file, so editing the file afterwards cannot change what is rerun. It inherits the original's spec-file and git info (they describe where the spec came from) and records `rerun_of`. It warns when the image ID changed.
+- **`verify`:** hashes each output file (SHA-256, streamed, symlinks skipped) and compares by relative path. Ignored by default: `metrics.json` and `*.attempts` (differ run to run) and `tiles/*` (intermediate pieces that exist only in parallel runs). The ignore set for a comparison is the union of both jobs' lists, so one job's custom list cannot hide a mismatch in the other.
+- **Found while testing:** the first version compared everything and reported a 1-pod run and an 8-tile run as different even though the final image was byte-identical, because only the parallel run kept tile files. That is why `tiles/*` is ignored by default.
+- **Not covered:** numeric tolerance for floating-point output, hashing of input data, and capturing the Python/library environment inside the image beyond its ID.
+
+## 7e. Parameter sweeps
+
+`scirun sweep <spec> --vary name=v1,v2 [--vary ...]` expands one spec into a grid of runs and compares them.
+
+- **Expansion on the raw YAML:** each combination edits the loaded spec mapping and then goes through the normal `parse_spec`, so a sweep gets exactly the same validation as `submit`, and every value is checked before anything is submitted. This is also why `resources.cpu` and `resources.memory` are now validated as positive Kubernetes quantities in the spec parser: a typo used to surface only as an API error, possibly halfway through a sweep.
+- **What can vary:** `cpu`, `memory`, `parallelism`, `retries`. Not the workload's own arguments: sweeping those would need per-workload knowledge, and the point here is how the platform settings affect a fixed computation. At most 16 runs.
+- **Sequential by default:** runs share one cluster, so running them together would measure contention, not the setting. The cost is wall-clock time; `--dry-run` shows the plan first.
+- **A failure does not stop the sweep:** the failed run is listed (red dot) and the exit code is 1 at the end. Ctrl-C stops after the current run and still prints the table for what finished.
+- **`parallelism=1`** removes the `gather` block, since a single pod has nothing to combine.
+- **Speedup baseline:** the first successful run. TIME includes the gather job's duration for parallel runs, so the comparison does not flatter them; COMPUTE shows the workload's own time to expose overhead.
+- **No sweep state file:** each run is an ordinary job with its own record, and the final hint prints a `scirun report` line to reproduce the table later. Simpler than a second record type.
+- **Measured (3000x2000, 4-node kind):** parallelism 1, 2, 4, 8 gave TIME 50, 30, 20, 14s (1.0x to 3.6x) and COMPUTE 46.3, 23.2, 13.8, 7.6s. CPU utilization fell from 100% to 82% as strips became uneven.
 
 ## 8. Repository layout
 

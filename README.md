@@ -21,6 +21,10 @@ scirun list                              # jobs on the cluster, newest first
 scirun delete <job-id>... [--results]    # remove jobs; --results also deletes output files
 scirun gather <job-id>                   # (re)run the combine step of a parallel job
 scirun status <job-id> --tiles           # one row per tile of a parallel job
+scirun show <job-id>                     # provenance: spec, git commit, image, output checksums
+scirun rerun <job-id> [-f]               # resubmit the exact same spec
+scirun verify <job-a> <job-b>            # did two runs produce byte-identical outputs?
+scirun sweep <spec> --vary k=a,b         # run a grid of settings and compare them
 ```
 
 Example report, running the same workload at different CPU limits:
@@ -61,6 +65,47 @@ Example, 3000x2000 render, 8 tiles, on one kind node: 50s for a single pod and 1
 
 The Mandelbrot workload has failure-injection flags for experiments: `--fail-tiles 2,5 --fail-attempts 1` makes those tiles crash on their first attempt, and `--slow-tile 4 --slow-seconds 40` makes one tile slow.
 
+## Reproducible runs
+
+Every `submit` saves what produced the result next to it, in `~/.scirun/results/.jobs/<job-id>.json`: the full spec, the git commit and dirty state of the repo the spec lives in, the spec file's SHA-256, the local Docker image ID, and the SciRun version.
+
+```bash
+scirun show <job-id>              # provenance + a SHA-256 for every output file
+scirun rerun <job-id> --follow    # resubmit the saved spec, even if the YAML file has since changed
+scirun verify <job-a> <job-b>     # compare outputs byte for byte
+```
+
+```text
+● Identical  mandelbrot-8c6b0c = mandelbrot-e5f65e
+  ⎿  1 files, all byte-for-byte equal
+```
+
+That example compares a 1-pod run with an 8-tile run: the stitched image is the same file. `verify` skips files that legitimately differ between identical runs (`metrics.json`, retry counters, and the intermediate `tiles/` folder). Override with `verify_ignore: [patterns]` in the spec. `rerun` warns if the local image has changed since the original run.
+
+Limits: `verify` compares bytes, so a workload with non-deterministic or hardware-dependent floating point can differ between identical-looking runs, and there is no numeric tolerance yet. The image ID comes from the local Docker daemon, so it is recorded only when `docker` is available; git info only when the spec is inside a git repository.
+
+## Parameter sweeps
+
+`scirun sweep` runs one spec under several settings, one run at a time, and ends with a comparison table.
+
+```bash
+scirun sweep examples/mandelbrot-parallel.yaml --vary parallelism=1,2,4,8
+scirun sweep spec.yaml --vary cpu=0.5,1 --vary memory=512Mi,1Gi   # several --vary make a grid
+scirun sweep spec.yaml --vary parallelism=1,2,4 --dry-run          # show the plan, submit nothing
+```
+
+```text
+SETTINGS         JOB                TIME   SPEEDUP  COMPUTE  CPU   MEM
+● parallelism=1  mandelbrot-3bf626  50.0s  1.0x     46.3s    100%  419Mi
+● parallelism=2  mandelbrot-8b4607  30.0s  1.7x     23.2s    101%  248Mi
+● parallelism=4  mandelbrot-b806e5  20.0s  2.5x     13.8s    87%   141Mi
+● parallelism=8  mandelbrot-f57705  14.0s  3.6x     7.6s     82%   87Mi
+```
+
+Reading it: TIME runs from submit to finish and includes pod startup and the gather step; COMPUTE is the workload's own time. Doubling the pods does not halve TIME: 8 pods cut compute from 46s to 7.6s (6x) but TIME only 3.6x, because of startup overhead and uneven strips. CPU is how much of the requested CPUs the workload actually used.
+
+Details: variables are `cpu`, `memory`, `parallelism` and `retries`; at most 16 runs; a failed run is shown and the sweep carries on. Runs are sequential on purpose, since concurrent jobs would share the cluster's CPUs and distort each other's timings. Every run is a normal job with its own record, so `scirun show`, `rerun` and `verify` work on them, and `scirun report <ids>` reprints the comparison. Setting `parallelism=1` drops the gather step automatically.
+
 ## Experiment spec
 
 ```yaml
@@ -76,6 +121,7 @@ parallelism: 8    # optional: split across 8 pods (default 1)
 retries: 2        # optional: extra attempts per tile (default 2)
 gather:           # optional, needs parallelism > 1: args for the combine step
   args: ["--gather", "--width", 2000, "--height", 1333, "--out", "/results/mandelbrot.png"]
+verify_ignore: ["metrics.json", "*.attempts", "tiles/*"]   # optional: outputs `scirun verify` skips (this is the default)
 ```
 
 An optional `command` overrides the image entrypoint. Unknown fields are rejected. In a parallel job the workload receives `JOB_COMPLETION_INDEX` (its tile) and `SCIRUN_TILE_COUNT`, and `NODE_NAME` is set for every job.
@@ -121,7 +167,7 @@ uv run ruff check .
 ## Roadmap
 
 Done: Mandelbrot workload, Kubernetes Job, CLI (`submit`, `status`, `logs`), results retrieval, resource report.
-Also done: `list`, `delete`, parallel jobs with per-tile retries and a gather step. Possible next steps: cluster-level metrics for long jobs, object-storage results for real clusters.
+Also done: `list`, `delete`, parallel jobs with per-tile retries and a gather step, reproducible runs (`show`, `rerun`, `verify`). parameter sweeps (`sweep`). Possible next steps: cluster-level metrics for long jobs, object-storage results for real clusters.
 
 ## License
 

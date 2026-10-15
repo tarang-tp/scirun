@@ -13,10 +13,10 @@ from scirun.config import ExperimentSpec, results_root
 from scirun.results import valid_job_id
 
 
-def save_record(job_id: str, spec: ExperimentSpec) -> None:
+def save_record(job_id: str, spec: ExperimentSpec, provenance: dict | None = None) -> None:
     path = results_root() / ".jobs" / f"{job_id}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(asdict(spec)))
+    path.write_text(json.dumps({**asdict(spec), "provenance": provenance or {}}))
 
 
 def load_record(job_id: str) -> dict | None:

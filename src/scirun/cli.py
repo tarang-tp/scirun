@@ -8,9 +8,17 @@ import typer
 import urllib3
 from kubernetes.client.rest import ApiException
 from rich.live import Live
+from rich.text import Text
 
-from scirun import ui
-from scirun.config import ExperimentSpec, SpecError, load_spec, results_root
+from scirun import provenance, ui
+from scirun import sweep as sweeps
+from scirun.config import (
+    ExperimentSpec,
+    SpecError,
+    load_spec,
+    load_spec_data,
+    results_root,
+)
 from scirun.kubernetes import jobs
 from scirun.kubernetes import logs as k8s_logs
 from scirun.records import (
@@ -20,8 +28,13 @@ from scirun.records import (
     save_record,
     spec_from_record,
 )
-from scirun.report import ReportRow, build_row, table_cells
-from scirun.results import ResultsNotFound, delete_results, fetch_results
+from scirun.report import (
+    ReportRow,
+    build_row,
+    cpu_utilization,
+    table_cells,
+)
+from scirun.results import ResultsNotFound, delete_results, fetch_results, valid_job_id
 
 ui.apply_help_theme()
 app = typer.Typer(
@@ -37,7 +50,11 @@ _COMMANDS = [
     ("logs <job-id> [-f]", "print or stream container logs"),
     ("results <job-id>", "copy output files to local disk"),
     ("report <job-id>...", "compare resources, timings and usage"),
+    ("sweep <spec> --vary k=a,b", "run a grid of settings and compare them"),
     ("gather <job-id>", "(re)run the combine step of a parallel job"),
+    ("show <job-id>", "provenance and output checksums"),
+    ("rerun <job-id>", "resubmit the exact same spec"),
+    ("verify <a> <b>", "check two runs produced identical outputs"),
     ("delete <job-id>...", "remove jobs (and optionally results)"),
 ]
 
@@ -82,17 +99,31 @@ def submit(
 ) -> None:
     """Submit an experiment spec as a Kubernetes Job."""
     parsed = _guard(load_spec, spec)
+    _launch(parsed, follow=follow, spec_path=Path(spec))
+
+
+def _launch(
+    parsed: ExperimentSpec,
+    *,
+    follow: bool,
+    spec_path: Path | None = None,
+    rerun_of: str | None = None,
+    base_provenance: dict | None = None,
+) -> None:
     job_id = _guard(jobs.submit_job, parsed)
+    prov = provenance.collect(parsed, spec_path, rerun_of=rerun_of, base=base_provenance)
     try:
-        save_record(job_id, parsed)
+        save_record(job_id, parsed, prov)
     except OSError as e:
-        ui.warning(f"could not save job record ({e.strerror}); `report` and `gather` will lack the spec")
+        ui.warning(f"could not save job record ({e.strerror}); `report`, `gather` and `rerun` will lack the spec")
     if not sys.stdout.isatty() and not follow:
         typer.echo(job_id)  # plain, so `ID=$(scirun submit ...)` keeps working
         return
     ui.bullet("Submitted ", (job_id, "bold accent"), style="ok")
     size = f"{parsed.parallelism} tiles · " if parsed.parallelism > 1 else ""
     ui.detail(f"{parsed.name} · {parsed.image} · {size}{parsed.cpu} CPU · {parsed.memory}")
+    if rerun_of:
+        ui.detail(f"rerun of {rerun_of}")
     if not follow:
         ui.detail(f"track it with: scirun status {job_id}")
         return
@@ -363,3 +394,188 @@ def _summarize_files(files: list[Path]) -> list[str]:
             folders[f.parts[0]] = folders.get(f.parts[0], 0) + 1
     entries += [f"{name}/ ({n} {'file' if n == 1 else 'files'})" for name, n in folders.items()]
     return entries
+
+
+def _record_spec(job_id: str) -> tuple[dict, ExperimentSpec]:
+    if not valid_job_id(job_id):
+        _fail(f"invalid job id: {job_id!r}")
+    record = load_record(job_id)
+    spec = spec_from_record(record)
+    if record is None or spec is None:
+        _fail(f"no saved spec for {job_id} (was it submitted with this version of scirun?)")
+    return record, spec
+
+
+@app.command()
+def show(job_id: str) -> None:
+    """Show what produced a job's results: spec, git state, image, and output checksums."""
+    record, spec = _record_spec(job_id)
+    prov = record.get("provenance") or {}
+
+    def phase_or_none() -> str | None:
+        try:
+            return jobs.get_status(job_id).phase
+        except jobs.JobNotFound:
+            return None
+
+    phase = _guard(phase_or_none)
+    ui.bullet((job_id, "bold accent"), "  ", ui.phase(phase or "gone"), style=ui.PHASE_STYLE[phase or "gone"])
+    ui.detail(f"submitted {prov.get('submitted_at', 'unknown')} with scirun {prov.get('scirun_version', '?')}")
+    if prov.get("rerun_of"):
+        ui.detail(f"rerun of {prov['rerun_of']}")
+    image = prov.get("image") or {}
+    image_id = (image.get("id") or "unknown").removeprefix("sha256:")[:12]
+    ui.detail(f"image {spec.image} ({image_id})")
+    if prov.get("spec_file"):
+        ui.detail(f"spec {prov['spec_file']} (sha256 {str(prov.get('spec_sha256'))[:12]})")
+    git = prov.get("git")
+    if git:
+        ui.detail(f"git {git['commit'][:10]}" + (" + uncommitted changes" if git["dirty"] else ""),
+                  style="warn" if git["dirty"] else "muted")
+    else:
+        ui.detail("git: not recorded (spec was not inside a git repository)")
+    parts = [f"{spec.cpu} CPU", spec.memory] + ([f"{spec.parallelism} tiles"] if spec.parallelism > 1 else [])
+    ui.detail(" · ".join(parts))
+
+    ignore = spec.verify_ignore if spec.verify_ignore is not None else provenance.DEFAULT_IGNORE
+    folder = results_root() / job_id
+    if not folder.is_dir():
+        ui.detail("no results folder on disk", style="warn")
+        return
+    manifest, ignored = provenance.output_manifest(folder, ignore)
+    ui.console.print()
+    ui.console.print(ui.outputs_table(manifest))
+    if ignored:
+        ui.console.print(Text(f"  ({ignored} intermediate/timing files not hashed: {', '.join(ignore)})", style="muted"))
+
+
+@app.command()
+def rerun(
+    job_id: str,
+    follow: bool = typer.Option(False, "--follow", "-f", help="Watch progress, then run the gather step"),
+) -> None:
+    """Resubmit the exact spec a job was run with, even if the spec file has changed since."""
+    record, spec = _record_spec(job_id)
+    prov = record.get("provenance") or {}
+    was = (prov.get("image") or {}).get("id")
+    now = provenance.collect(spec)["image"]["id"]
+    if was and now and was != now:
+        ui.warning(f"image {spec.image} has changed since {job_id} ran; results may differ")
+    _launch(spec, follow=follow, rerun_of=job_id, base_provenance=prov)
+
+
+@app.command()
+def verify(job_a: str, job_b: str) -> None:
+    """Check whether two runs produced byte-identical outputs (timings and counters are ignored)."""
+    _, spec_a = _record_spec(job_a)
+    _, spec_b = _record_spec(job_b)
+    # Skip whatever either run's spec says to skip, so one custom list can't hide a mismatch.
+    ignore = {*(spec_a.verify_ignore or provenance.DEFAULT_IGNORE), *(spec_b.verify_ignore or provenance.DEFAULT_IGNORE)}
+    manifests = []
+    for job_id in (job_a, job_b):
+        folder = results_root() / job_id
+        if not folder.is_dir():
+            _fail(f"no results folder for {job_id}")
+        manifest, _ = provenance.output_manifest(folder, ignore)
+        if not manifest:
+            _fail(f"{job_id} has no output files to compare")
+        manifests.append(manifest)
+    diff = provenance.compare(*manifests)
+    if diff.identical:
+        ui.bullet("Identical  ", (job_a, "bold accent"), " = ", (job_b, "bold accent"), style="ok")
+        ui.detail(f"{len(diff.same)} files, all byte-for-byte equal")
+        return
+    ui.bullet("Different  ", (job_a, "bold accent"), " ≠ ", (job_b, "bold accent"), style="err")
+    for label, names, style in (
+        ("differs", diff.changed, "err"),
+        (f"only in {job_a}", diff.only_a, "warn"),
+        (f"only in {job_b}", diff.only_b, "warn"),
+    ):
+        for name in names:
+            ui.detail(f"{label}: {name}", style=style)
+    ui.detail(f"{len(diff.same)} files equal")
+    raise typer.Exit(1)
+
+
+_VARY_HELP = f"name=v1,v2 (repeatable; names: {', '.join(sweeps.VARIABLES)}). Several --vary make a grid."
+
+
+@app.command()
+def sweep(
+    spec: str = typer.Argument(..., help="Path to an experiment YAML spec"),
+    vary: list[str] = typer.Option(..., "--vary", "-v", help=_VARY_HELP),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show the planned runs without submitting anything"),
+) -> None:
+    """Run one spec under several settings, one after another, and compare the results."""
+    runs = _guard(lambda: sweeps.expand(_guard(load_spec_data, spec), sweeps.parse_vary(vary)))
+    names = ", ".join(sweeps.parse_vary(vary))
+    ui.bullet(f"Sweep over {names}: ", (f"{len(runs)} runs", "bold accent"), style="accent")
+    for i, run in enumerate(runs, 1):
+        ui.detail(f"{i}. {run.label}")
+    if dry_run:
+        ui.detail("dry run: nothing submitted")
+        return
+    ui.detail("runs go one at a time so they do not compete for CPUs (this can take a while)")
+
+    results: list[dict] = []
+    try:
+        for i, run in enumerate(runs, 1):
+            ui.console.print()
+            ui.bullet(f"[{i}/{len(runs)}] ", (run.label, "bold"), style="muted")
+            results.append(_sweep_one(run, Path(spec)))
+    except KeyboardInterrupt:
+        ui.detail("interrupted; the run in progress keeps going. Showing what finished:", style="warn")
+    if not results:
+        raise typer.Exit(130)
+
+    ui.console.print()
+    ui.console.print(ui.sweep_table(_sweep_rows(results)))
+    ui.console.print(Text(
+        "\n  TIME: submit to finish, incl. startup and gather. COMPUTE: workload time.\n"
+        "  CPU: share of requested CPUs used. MEM: peak per pod.",
+        style="muted",
+    ))
+    ids = " ".join(r["job_id"] for r in results)
+    ui.console.print(Text(f"\n  compare again later: scirun report {ids}", style="muted"))
+    if any(r["phase"] != "Succeeded" for r in results):
+        raise typer.Exit(1)
+
+
+def _sweep_one(run: sweeps.Run, spec_path: Path) -> dict:
+    """Submit one run, wait for it (and its gather step), and return how it went."""
+    job_id = _guard(jobs.submit_job, run.spec)
+    try:
+        save_record(job_id, run.spec, provenance.collect(run.spec, spec_path))
+    except OSError:
+        pass  # the table below still works from the cluster; only `report` loses the request
+    parallel = run.spec.parallelism > 1
+    status = _follow(job_id, "tiles" if parallel else "")
+    total = status.duration_seconds or 0.0
+    phase = status.phase
+    if phase == "Succeeded" and parallel and run.spec.gather:
+        gather_status = _follow(_guard(jobs.submit_gather, run.spec, job_id), "gather")
+        total += gather_status.duration_seconds or 0.0
+        phase = gather_status.phase
+    if phase == "Failed":
+        ui.detail(status.detail or "run failed", style="err")
+    return {"run": run, "job_id": job_id, "phase": phase, "total": total if phase == "Succeeded" else None}
+
+
+def _sweep_rows(results: list[dict]) -> list[list[str]]:
+    speedup = sweeps.speedups([r["total"] for r in results])
+    rows = []
+    for r, factor in zip(results, speedup, strict=True):
+        job_id = r["job_id"]
+        row = build_row(job_id, None, load_record(job_id), load_metrics(job_id))
+        cpu = cpu_utilization(row)
+        rows.append([
+            r["run"].label,
+            job_id,
+            r["phase"],
+            f"{r['total']:.1f}s" if r["total"] else "-",
+            f"{factor:.1f}x" if factor else "-",
+            f"{row.run_seconds:.1f}s" if row.run_seconds is not None else "-",
+            f"{cpu:.0%}" if cpu is not None else "-",
+            f"{row.peak_memory / 2**20:.0f}Mi" if row.peak_memory else "-",
+        ])
+    return rows

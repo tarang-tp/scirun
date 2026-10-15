@@ -50,6 +50,44 @@ def humanize_age(seconds: float) -> str:
     return f"{seconds}s"
 
 
+def humanize_bytes(n: float) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.0f}{unit}" if unit == "B" else f"{n:.1f}{unit}"
+        n /= 1024
+    return f"{n:.1f}GB"
+
+
+def outputs_table(manifest: dict) -> Table:
+    table = Table(box=None, pad_edge=False, show_edge=False, header_style="muted", padding=(0, 1))
+    for h in ("FILE", "SIZE", "SHA-256"):
+        table.add_column(h, no_wrap=h == "FILE", overflow="fold" if h == "FILE" else "ellipsis")
+    for path, info in manifest.items():
+        table.add_row(Text(path, style="accent"), humanize_bytes(info["size"]), Text(info["sha256"][:16], style="muted"))
+    return table
+
+
+def sweep_table(rows: list[list[str]]) -> Table:
+    """Rows are [settings, job, phase, total time, speedup, compute time, cpu utilization, peak memory].
+
+    The phase shows as the colour of the leading dot, which keeps the table within 80 columns.
+    """
+    table = Table(box=None, pad_edge=False, show_edge=False, header_style="muted", padding=(0, 1))
+    for h in ("SETTINGS", "JOB", "TIME", "SPEEDUP", "COMPUTE", "CPU", "MEM"):
+        table.add_column(h, no_wrap=h in ("SETTINGS", "JOB"), overflow="fold" if h in ("SETTINGS", "JOB") else "ellipsis")
+    for settings, job, phase_name, total, speedup, compute, cpu, mem in rows:
+        table.add_row(
+            Text.assemble(("● ", PHASE_STYLE.get(phase_name, "muted")), (settings, "bold")),
+            Text(job, style="accent"),
+            total if total != "-" else Text(phase_name.lower(), style="err"),
+            Text(speedup, style="ok" if speedup not in ("-", "1.0x") else "muted"),
+            compute,
+            Text(cpu, style="muted" if cpu == "-" else ""),
+            Text(mem, style="muted" if mem == "-" else ""),
+        )
+    return table
+
+
 def list_table(rows: list[list[str]]) -> Table:
     """Rows are [job, experiment, phase, age, run time]."""
     table = Table(box=None, pad_edge=False, show_edge=False, header_style="muted", padding=(0, 1))
