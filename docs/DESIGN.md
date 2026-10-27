@@ -1,6 +1,6 @@
-# SciRun Design (v0 draft)
+# SciRun Design
 
-> Status: Stages 0-4 are implemented and the V1 definition in section 10 was verified end to end on a local kind cluster. Sections describe what was built and why. Update this document as decisions change.
+> Status: implemented and verified end to end on a local kind cluster (macOS, Apple Silicon). This document records what was built and why, including decisions that changed along the way. The user-facing guide is the [README](../README.md).
 
 ## 1. Goal
 
@@ -41,24 +41,24 @@ SciRun is stateless in V1: job identity and state live in Kubernetes (labels/ann
 
 Note: Apple Silicon means arm64 images; workload images should be built for the local architecture.
 
-## 5. Experiment spec (draft)
+## 5. Experiment spec
 
 `examples/mandelbrot.yaml`:
 
 ```yaml
 name: mandelbrot
-image: scirun/mandelbrot:0.1
-args: ["--width", 2000, "--out", "/results/mandelbrot.png"]   # optional `command` overrides the image entrypoint
-resources:        # applied as both requests and limits
+image: scirun/mandelbrot:0.3
+args: ["--width", 2000, "--height", 1333, "--max-iter", 300, "--out", "/results/mandelbrot.png"]   # optional `command` overrides the entrypoint
+resources:        # applied as both requests and limits, per pod
   cpu: "1"
   memory: 1Gi
 results:
-  path: /results  # mounted as an emptyDir until Stage 3
+  path: /results  # a hostPath volume, see section 7
 ```
 
-Implemented in Stage 2 (`src/scirun/config.py`). Unknown fields are rejected so typos fail fast. Job IDs are `<name>-<6 hex>`, used as the Kubernetes Job name; Jobs carry the labels `app.kubernetes.io/managed-by=scirun` and `scirun.io/experiment=<name>`.
+Parsed and validated in `src/scirun/config.py`. Unknown fields are rejected so typos fail fast, and CPU and memory must be positive Kubernetes quantities. The optional fields `parallelism`, `retries`, `gather` and `verify_ignore` are described in sections 7c-7d. Job IDs are `<name>-<6 hex>` and double as the Kubernetes Job name; Jobs carry the labels `app.kubernetes.io/managed-by=scirun`, `scirun.io/experiment=<name>` and `scirun.io/role=main|gather`.
 
-## 6. CLI commands (planned)
+## 6. CLI commands
 
 | Command | Behavior |
 |---|---|
@@ -148,25 +148,34 @@ Goal: be able to say what produced a result, rerun it, and check that the rerun 
 
 ```text
 scirun/
-├── README.md
-├── pyproject.toml
-├── src/scirun/{__init__,cli,config}.py
-├── src/scirun/kubernetes/{jobs,logs}.py
-├── workloads/mandelbrot/{main.py,Dockerfile,requirements.txt}
-├── examples/mandelbrot.yaml
-├── tests/
+├── README.md, LICENSE, pyproject.toml, uv.lock
+├── src/scirun/
+│   ├── cli.py            commands and live progress
+│   ├── config.py         spec parsing and validation
+│   ├── kubernetes/       jobs.py (manifests, status, tiles, delete), logs.py
+│   ├── records.py        per-job JSON record next to the results
+│   ├── results.py        copy and delete result folders
+│   ├── report.py         requested vs used resources
+│   ├── provenance.py     git/image/spec capture, output hashing, comparison
+│   ├── sweep.py          grid expansion for `scirun sweep`
+│   └── ui.py             terminal styling (rich)
+├── workloads/mandelbrot/ the example workload (single, tile and gather modes)
+├── examples/             specs, plus a hand-written Job manifest
+├── scripts/create-cluster.sh
+├── tests/                unit tests; test_workload.py runs the workload as a subprocess
 └── docs/DESIGN.md
 ```
 
 ## 9. Milestones
 
-| Stage | Deliverable | Done when |
+| Stage | Deliverable | Status |
 |---|---|---|
-| 0 | Mandelbrot workload + Dockerfile | Runs locally and in Docker, produces image |
-| 1 | Manual K8s Job manifest | Job completes on kind; status and logs inspected with kubectl; failure case observed |
-| 2 | CLI: submit/status/logs | Works against kind with the example spec |
-| 3 | `scirun results` | Output file lands on local disk reliably |
-| 4 | Observability | Duration and resource requests reported; compare configs |
+| 0 | Mandelbrot workload + Dockerfile | Done |
+| 1 | Hand-written K8s Job; inspect status, logs and a failure with kubectl | Done |
+| 2 | CLI: submit, status, logs | Done |
+| 3 | `scirun results` via a host-mounted volume | Done |
+| 4 | Resource report from workload-reported metrics | Done |
+| After V1 | `list`/`delete`, parallel jobs with per-tile retries and gather, reproducibility (`show`/`rerun`/`verify`), parameter sweeps | Done |
 
 ## 10. Definition of a working V1
 
@@ -179,9 +188,19 @@ From a clean checkout, with kind running, a user can:
 
 and failed jobs report `Failed` with a useful message. Basic unit tests cover spec parsing and Job manifest generation.
 
-## 11. Risks / open questions
+## 11. Risks and open questions
 
-- Result retrieval design (section 7)
-- Job ID scheme (Job name vs generated UUID label)
-- Docker Desktop memory footprint on the dev Mac
-- Image distribution to kind (`kind load docker-image` vs local registry)
+Resolved:
+
+- **Result retrieval:** a host-mounted volume (section 7).
+- **Job ID scheme:** `<name>-<6 hex>` as the Job name. Collisions are possible in principle (24 bits) and surface as a create error, not silent overwrite.
+- **Getting images into kind:** `kind load docker-image`; no registry.
+
+Open:
+
+- **Only local kind is supported.** A real cluster needs different result storage (object storage), a registry, and a way to choose the cluster and namespace explicitly. SciRun currently uses the current kubectl context and the `default` namespace.
+- **Usage metrics are self-reported by the workload.** Cluster-level metrics (metrics-server or Prometheus) would work for any workload, but sample too coarsely for jobs of a few seconds.
+- **`verify` compares bytes.** Floating-point output that varies across hardware needs a tolerance mode.
+- **Parallelism is a workload convention.** SciRun can schedule N tiles but cannot split an arbitrary program.
+- **No CI.** Tests run locally; the cluster behavior was verified by hand and by a throwaway script, not an automated suite.
+- **Docker Desktop memory:** four kind nodes are heavy; `SCIRUN_WORKERS=0` gives a single node.

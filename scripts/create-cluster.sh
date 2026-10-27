@@ -12,6 +12,11 @@ WORKERS="${SCIRUN_WORKERS:-3}"
 RESULTS_DIR="${SCIRUN_RESULTS_DIR:-$HOME/.scirun/results}"
 NODE_PATH="/scirun-results"   # keep in sync with NODE_RESULTS_ROOT in src/scirun/config.py
 
+if ! [[ "$WORKERS" =~ ^[0-9]+$ ]] || (( WORKERS > 9 )); then
+  echo "SCIRUN_WORKERS must be a whole number from 0 to 9 (got '$WORKERS')" >&2
+  exit 1
+fi
+
 if kind get clusters 2>/dev/null | grep -qx "$NAME"; then
   echo "kind cluster '$NAME' already exists. To rebuild it: kind delete cluster --name $NAME" >&2
   exit 1
@@ -31,5 +36,5 @@ YAML
 {
   printf 'kind: Cluster\napiVersion: kind.x-k8s.io/v1alpha4\nnodes:\n'
   node control-plane
-  for _ in $(seq 1 "$WORKERS"); do node worker; done
+  for ((i = 0; i < WORKERS; i++)); do node worker; done
 } | kind create cluster --name "$NAME" --config -
